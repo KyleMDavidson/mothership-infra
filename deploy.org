@@ -1,0 +1,124 @@
+* Mothership VPS Deployment
+
+Assumes Ubuntu on a DigitalOcean droplet with both ~mothership~ and
+~mothership-infra~ cloned into the home directory.
+
+** 1. Point DNS
+
+Add an A record for your domain pointing to the droplet's IP address.
+Wait for it to propagate before proceeding — Caddy's Let's Encrypt
+challenge will fail otherwise.
+
+** 2. Install Elixir & Erlang
+
+#+begin_src sh
+sudo apt update
+sudo apt install -y elixir erlang
+#+end_src
+
+** 3. Install Caddy
+
+#+begin_src sh
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install caddy
+#+end_src
+
+** 4. Install PostgreSQL and create the database
+
+#+begin_src sh
+sudo apt install -y postgresql
+sudo -u postgres psql -c "CREATE USER mothership WITH PASSWORD 'yourpassword';"
+sudo -u postgres psql -c "CREATE DATABASE mothership OWNER mothership;"
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE mothership TO mothership;"
+#+end_src
+
+** 5. Set environment variables
+
+Create ~/etc/mothership.env~:
+
+#+begin_example
+SECRET_KEY_BASE=<output of `mix phx.gen.secret`>
+DATABASE_URL=ecto://mothership:yourpassword@localhost/mothership
+PHX_HOST=yourdomain.com
+PORT=4000
+PHX_SERVER=true
+#+end_example
+
+** 6. Build and migrate
+
+#+begin_src sh
+cd ~/mothership
+mix deps.get --only prod
+MIX_ENV=prod mix compile
+MIX_ENV=prod mix ecto.migrate
+#+end_src
+
+** 7. Create a systemd unit for Phoenix
+
+We use systemd over tmux because: it restarts Phoenix automatically on crash;
+it starts on boot without manual intervention; it logs to journald with
+timestamps and rotation; and it has no dependency on a terminal session or
+SSH connection staying alive.
+
+Create ~/etc/systemd/system/mothership.service~:
+
+#+begin_example
+[Unit]
+Description=Mothership Phoenix Server
+After=network.target postgresql.service
+
+[Service]
+WorkingDirectory=/home/youruser/mothership
+EnvironmentFile=/etc/mothership.env
+ExecStart=/usr/bin/mix phx.server
+Restart=on-failure
+User=youruser
+
+[Install]
+WantedBy=multi-user.target
+#+end_example
+
+Then enable and start it:
+
+#+begin_src sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now mothership
+#+end_src
+
+** 8. Configure Caddy
+
+Replace ~yourdomain.com~ in ~caddy/Caddyfile~ with your actual domain, then
+copy it into place and start Caddy:
+
+#+begin_src sh
+sudo cp ~/mothership-infra/caddy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl enable --now caddy
+#+end_src
+
+Caddy will obtain a Let's Encrypt certificate automatically on first start.
+
+** 9. Firewall
+
+#+begin_src sh
+sudo ufw allow 22
+sudo ufw allow 80
+sudo ufw allow 443
+sudo ufw deny 4000
+sudo ufw enable
+#+end_src
+
+** 10. Verify
+
+Visit ~https://yourdomain.com~ — you should see the app over HTTPS with a
+valid certificate. Check service status if anything is wrong:
+
+#+begin_src sh
+sudo systemctl status mothership
+sudo systemctl status caddy
+sudo journalctl -u mothership -n 50
+sudo journalctl -u caddy -n 50
+#+end_src
